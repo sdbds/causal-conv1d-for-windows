@@ -137,11 +137,12 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
     static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
-    BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
-        using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
+    
+    auto launch_kernel = [&](auto kIsVecLoad) {
+        using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, 
+                        kIsVecLoad.value, input_t, weight_t>;
         constexpr int kSmemSize = Ktraits::kSmemSize;
         dim3 grid(params.batch, params.dim);
-
         auto kernel = &causal_conv1d_fwd_kernel<Ktraits>;
 
         if (kSmemSize >= 48 * 1024) {
@@ -149,16 +150,24 @@ void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
             C10_CUDA_CHECK(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
             #else
-            // There is a slight signature discrepancy in HIP and CUDA "FuncSetAttribute" function.
             C10_CUDA_CHECK(cudaFuncSetAttribute(
                 (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+            std::cerr << "Warning (causal_conv1d fwd launch): attempting to set "
+                     << "maxDynamicSharedMemorySize on an AMD GPU which is currently "
+                     << "a non-op (in ROCm versions <= 6.1). This might lead to "
+                     << "undefined behavior.\n" << std::endl;
             #endif
         }
-        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
 
+        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-    });
+    };
+
+    if (params.seqlen % kNElts == 0) {
+        launch_kernel(std::bool_constant<true>{});
+    } else {
+        launch_kernel(std::bool_constant<false>{});
+    }
 }
 
 template<typename input_t, typename weight_t>
